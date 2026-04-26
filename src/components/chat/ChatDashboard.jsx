@@ -14,10 +14,13 @@ import {
   Plus,
   Trash2,
   MessageSquare,
+  Table2,
+  ChevronRight,
 } from 'lucide-react';
 import { motion, AnimatePresence } from 'framer-motion';
 import { useAuth } from '../../contexts/AuthContext';
 import StaggeredList from '../ui/StaggeredList';
+import SchemaBuilderPanel from '../schema/SchemaBuilderPanel';
 
 const API_URL = import.meta.env.VITE_API_URL || 'http://localhost:3001';
 
@@ -87,16 +90,50 @@ function TypingIndicator() {
 }
 
 // --- Main Chat Dashboard ---
+// ── Schema sidebar item ──────────────────────────────────────────────────────
+function SchemaItem({ schema, active, onClick }) {
+  return (
+    <div
+      onClick={onClick}
+      className={`
+        w-full text-left px-3 py-2.5 rounded-xl flex items-center gap-2 transition-all cursor-pointer
+        ${active ? 'bg-white border border-slate-200 shadow-sm' : 'hover:bg-slate-200/50 border border-transparent'}
+      `}
+    >
+      <Table2 size={13} className={`flex-shrink-0 ${active ? 'text-indigo-600' : 'text-slate-400'}`} />
+      <div className="flex-1 min-w-0">
+        <div className={`text-sm font-mono truncate font-semibold ${active ? 'text-slate-900' : 'text-slate-700'}`}>
+          {schema.table_name}
+        </div>
+        <div className="text-xs text-slate-400">{schema.column_count} columns</div>
+      </div>
+      {schema.is_complete === 1 && (
+        <span className="text-[9px] font-bold text-emerald-600 bg-emerald-50 border border-emerald-200 px-1.5 py-0.5 rounded-full flex-shrink-0">✓</span>
+      )}
+    </div>
+  );
+}
+
 export default function ChatDashboard() {
   const { user } = useAuth();
-  const [sessions, setSessions] = useState([]);
-  const [activeSessionId, setActiveSessionId] = useState(null);
-  const [messages, setMessages] = useState([]);
-  const [inputValue, setInputValue] = useState('');
-  const [selectedFiles, setSelectedFiles] = useState([]);
-  const [isSidebarOpen, setIsSidebarOpen] = useState(true);
-  const [isLoading, setIsLoading] = useState(false);
+
+  // ── Original chat state (untouched) ──────────────────────────────────────
+  const [sessions,         setSessions]         = useState([]);
+  const [activeSessionId,  setActiveSessionId]  = useState(null);
+  const [messages,         setMessages]         = useState([]);
+  const [inputValue,       setInputValue]       = useState('');
+  const [selectedFiles,    setSelectedFiles]    = useState([]);
+  const [isSidebarOpen,    setIsSidebarOpen]    = useState(true);
+  const [isLoading,        setIsLoading]        = useState(false);
   const [connectionStatus, setConnectionStatus] = useState('checking');
+
+  // ── Schema builder state (new) ────────────────────────────────────────────
+  const [sidebarMode,     setSidebarMode]     = useState('chat');   // 'chat' | 'schema'
+  const [schemas,         setSchemas]         = useState([]);
+  const [activeTableId,   setActiveTableId]   = useState(null);
+  const [schemaKey,       setSchemaKey]       = useState(0);        // force re-mount on New Schema
+  // The table selected to chat ABOUT in the chat area
+  const [activeSchemaId,  setActiveSchemaId]  = useState(null);     // tableId | null
   
   const messagesEndRef = useRef(null);
   const fileInputRef = useRef(null);
@@ -118,10 +155,11 @@ export default function ChatDashboard() {
     checkHealth();
   }, []);
 
-  // Load user's sessions on mount
+  // ── Load sessions & schemas on mount ────────────────────────────────────
   useEffect(() => {
     if (!user?.uid) return;
     loadSessions();
+    loadSchemas();
   }, [user?.uid]);
 
   const loadSessions = async () => {
@@ -132,6 +170,17 @@ export default function ChatDashboard() {
       setSessions(data.sessions || []);
     } catch (err) {
       console.error('Failed to load sessions:', err);
+    }
+  };
+
+  const loadSchemas = async () => {
+    if (!user?.uid) return;
+    try {
+      const res  = await fetch(`${API_URL}/api/schema/list?uid=${user.uid}`);
+      const data = await res.json();
+      setSchemas(data.tables || []);
+    } catch (err) {
+      console.error('Failed to load schemas:', err);
     }
   };
 
@@ -232,7 +281,7 @@ export default function ChatDashboard() {
   };
 
   // Stream chat response
-  const streamChatResponse = useCallback(async (userMessage, conversationHistory) => {
+  const streamChatResponse = useCallback(async (userMessage, conversationHistory, schemaId = null) => {
     const botMsgId = Date.now() + 1;
     setMessages(prev => [...prev, { id: botMsgId, role: 'bot', text: '' }]);
 
@@ -247,6 +296,9 @@ export default function ChatDashboard() {
             role: m.role === 'bot' ? 'assistant' : 'user',
             content: m.text,
           })),
+          // ── New: schema context ────────────────────────────────────
+          schemaId: schemaId || null,
+          uid:      user?.uid || null,
         }),
       });
 
@@ -399,7 +451,8 @@ export default function ChatDashboard() {
         botResponse = await streamVisionResponse(imageFile, userText);
       } else {
         const history = messages.filter(m => m.role === 'user' || m.role === 'bot');
-        botResponse = await streamChatResponse(userText, history);
+        // Pass the currently selected schema (if any) for data-aware context
+        botResponse = await streamChatResponse(userText, history, activeSchemaId);
       }
 
       // Save bot response to DB
@@ -427,72 +480,153 @@ export default function ChatDashboard() {
         {isSidebarOpen ? <X size={20} /> : <Menu size={20} />}
       </button>
 
-      {/* Sidebar Panel */}
+      {/* ─────────────── Sidebar Panel ─────────────── */}
       <div className={`
         ${isSidebarOpen ? 'translate-x-0' : '-translate-x-full'}
         md:translate-x-0 transition-transform duration-300 ease-in-out
         absolute md:relative z-30 h-full w-72 md:w-80 bg-slate-50 border-r border-slate-200 flex flex-col shadow-[4px_0_24px_rgba(0,0,0,0.02)]
       `}>
-        <div className="p-4 border-b border-slate-200">
-          <button
-            onClick={() => {
-              setActiveSessionId(null);
-              setMessages([]);
-            }}
-            className="w-full py-2.5 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-sm font-medium transition-all flex items-center justify-center gap-2 active:scale-95"
-          >
-            <Plus size={16} /> New Session
-          </button>
-        </div>
-        
-        {/* Connection Status */}
-        <div className="px-4 py-2 border-b border-slate-100">
-          <div className="flex items-center gap-2">
-            <div className={`w-2 h-2 rounded-full ${
-              connectionStatus === 'connected' ? 'bg-emerald-500' :
-              connectionStatus === 'checking' ? 'bg-amber-500 animate-pulse' :
-              'bg-red-400'
-            }`} />
-            <span className="text-xs text-slate-500 font-medium">
-              {connectionStatus === 'connected' && 'Ollama Connected'}
-              {connectionStatus === 'checking' && 'Checking connection...'}
-              {connectionStatus === 'disconnected' && 'Ollama Offline'}
-            </span>
-          </div>
+
+        {/* ── Mode Tabs ─────────────────────────────── */}
+        <div className="flex border-b border-slate-200">
+          {[
+            { id: 'chat',   icon: <MessageSquare size={13} />, label: 'Chat'   },
+            { id: 'schema', icon: <Table2        size={13} />, label: 'Schema' },
+          ].map(tab => (
+            <button
+              key={tab.id}
+              onClick={() => setSidebarMode(tab.id)}
+              className={`flex-1 flex items-center justify-center gap-1.5 py-3 text-xs font-semibold transition-colors ${
+                sidebarMode === tab.id
+                  ? 'text-indigo-700 bg-indigo-50 border-b-2 border-indigo-600'
+                  : 'text-slate-500 hover:text-slate-700'
+              }`}
+            >
+              {tab.icon} {tab.label}
+            </button>
+          ))}
         </div>
 
-        <div className="flex-1 overflow-y-auto p-3 space-y-1">
-          {sessions.length > 0 ? (
-            <>
-              <div className="px-3 py-2 text-xs font-bold text-slate-400 uppercase tracking-wider mt-1 mb-1">Recent Chats</div>
-              <StaggeredList
-                items={sessions}
-                keyExtractor={(s) => s.id}
-                className="space-y-1"
-                renderItem={(session) => (
-                  <SessionItem
-                    session={session}
-                    active={session.id === activeSessionId}
-                    onClick={() => setActiveSessionId(session.id)}
-                    onDelete={() => deleteSession(session.id)}
-                  />
-                )}
-              />
-            </>
-          ) : (
-            <motion.div
-              initial={{ opacity: 0, y: 10 }}
-              animate={{ opacity: 1, y: 0 }}
-              className="flex flex-col items-center justify-center h-40 text-slate-400"
+        {/* ── Action button ─────────────────────────── */}
+        <div className="p-3 border-b border-slate-200">
+          {sidebarMode === 'chat' ? (
+            <button
+              onClick={() => { setActiveSessionId(null); setMessages([]); }}
+              className="w-full py-2 px-4 bg-indigo-600 hover:bg-indigo-700 text-white rounded-xl shadow-sm font-medium transition-all flex items-center justify-center gap-2 active:scale-95 text-sm"
             >
-              <MessageSquare size={24} className="mb-2 opacity-50" />
-              <span className="text-sm">No chats yet</span>
-            </motion.div>
+              <Plus size={15} /> New Session
+            </button>
+          ) : (
+            <button
+              onClick={() => {
+                setActiveTableId(null);
+                setSchemaKey(k => k + 1);
+              }}
+              className="w-full py-2 px-4 bg-gradient-to-r from-indigo-600 to-cyan-600 hover:from-indigo-700 hover:to-cyan-700 text-white rounded-xl shadow-sm font-medium transition-all flex items-center justify-center gap-2 active:scale-95 text-sm"
+            >
+              <Plus size={15} /> New Schema
+            </button>
+          )}
+        </div>
+
+        {/* ── Connection status (chat mode only) ────── */}
+        {sidebarMode === 'chat' && (
+          <div className="px-4 py-2 border-b border-slate-100">
+            <div className="flex items-center gap-2">
+              <div className={`w-2 h-2 rounded-full ${
+                connectionStatus === 'connected'    ? 'bg-emerald-500' :
+                connectionStatus === 'checking'     ? 'bg-amber-500 animate-pulse' :
+                'bg-red-400'
+              }`} />
+              <span className="text-xs text-slate-500 font-medium">
+                {connectionStatus === 'connected'    && 'Ollama Connected'}
+                {connectionStatus === 'checking'     && 'Checking connection...'}
+                {connectionStatus === 'disconnected' && 'Ollama Offline'}
+              </span>
+            </div>
+          </div>
+        )}
+
+        {/* ── List area ─────────────────────────────── */}
+        <div className="flex-1 overflow-y-auto p-3 space-y-1">
+
+          {sidebarMode === 'chat' ? (
+            /* Chat sessions list */
+            sessions.length > 0 ? (
+              <>
+                <div className="px-3 py-2 text-xs font-bold text-slate-400 uppercase tracking-wider mt-1 mb-1">Recent Chats</div>
+                <StaggeredList
+                  items={sessions}
+                  keyExtractor={(s) => s.id}
+                  className="space-y-1"
+                  renderItem={(session) => (
+                    <SessionItem
+                      session={session}
+                      active={session.id === activeSessionId}
+                      onClick={() => setActiveSessionId(session.id)}
+                      onDelete={() => deleteSession(session.id)}
+                    />
+                  )}
+                />
+              </>
+            ) : (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex flex-col items-center justify-center h-40 text-slate-400"
+              >
+                <MessageSquare size={24} className="mb-2 opacity-50" />
+                <span className="text-sm">No chats yet</span>
+              </motion.div>
+            )
+          ) : (
+            /* Schemas list */
+            schemas.length > 0 ? (
+              <>
+                <div className="px-3 py-2 text-xs font-bold text-slate-400 uppercase tracking-wider mt-1 mb-1">Your Schemas</div>
+                <div className="space-y-1">
+                  {schemas.map(s => (
+                    <SchemaItem
+                      key={s.table_id}
+                      schema={s}
+                      active={s.table_id === activeTableId}
+                      onClick={() => {
+                        setActiveTableId(s.table_id);
+                        setSchemaKey(k => k + 1);
+                      }}
+                    />
+                  ))}
+                </div>
+              </>
+            ) : (
+              <motion.div
+                initial={{ opacity: 0, y: 10 }}
+                animate={{ opacity: 1, y: 0 }}
+                className="flex flex-col items-center justify-center h-40 text-slate-400"
+              >
+                <Database size={24} className="mb-2 opacity-50" />
+                <span className="text-sm">No schemas yet</span>
+                <span className="text-xs text-slate-300 mt-1">Click + New Schema to start</span>
+              </motion.div>
+            )
           )}
         </div>
       </div>
 
-      {/* Chat Area */}
+      {/* ─────────────── Main Content Area ─────────────── */}
+      {sidebarMode === 'schema' ? (
+        /* Schema Builder */
+        <div key={schemaKey} className="flex-1 h-full min-w-0 overflow-hidden">
+          <SchemaBuilderPanel
+            uid={user?.uid || 'guest'}
+            displayName={user?.displayName || ''}
+            email={user?.email || ''}
+            initialTableId={activeTableId}
+            onSchemasShouldRefresh={loadSchemas}
+          />
+        </div>
+      ) : (
+      /* ─── Original Chat Area (untouched) ─────────────── */
       <div className="flex-1 flex flex-col h-full relative min-w-0">
         
         {showEmptyState ? (
@@ -587,6 +721,44 @@ export default function ChatDashboard() {
         {/* Input Area */}
         <div className="p-4 md:p-6 bg-white border-t border-slate-200 relative">
           <div className="max-w-3xl mx-auto">
+
+            {/* ── Schema Context Selector ──────────────────────────────── */}
+            {schemas.length > 0 && (
+              <div className="flex items-center gap-2 mb-3 flex-wrap">
+                <span className="text-[11px] text-slate-400 font-medium flex-shrink-0">
+                  Chat about:
+                </span>
+                <div className="relative flex-1 min-w-0">
+                  <select
+                    value={activeSchemaId ?? ''}
+                    onChange={e => setActiveSchemaId(e.target.value || null)}
+                    className="w-full text-xs font-medium text-indigo-700 bg-indigo-50 border border-indigo-200 rounded-lg px-2.5 py-1.5 pr-7 focus:outline-none focus:ring-1 focus:ring-indigo-400 cursor-pointer appearance-none"
+                  >
+                    <option value="">— General (no schema) —</option>
+                    {schemas.map(s => (
+                      <option key={s.table_id} value={s.table_id}>
+                        🗄 {s.table_name}  ({s.row_count ?? 0} rows)
+                      </option>
+                    ))}
+                  </select>
+                  <ChevronRight size={11} className="absolute right-2 top-1/2 -translate-y-1/2 text-indigo-400 pointer-events-none rotate-90" />
+                </div>
+                {activeSchemaId && (
+                  <button
+                    onClick={() => setActiveSchemaId(null)}
+                    className="flex-shrink-0 text-[10px] text-slate-400 hover:text-red-500 transition-colors px-1.5 py-1 rounded hover:bg-red-50"
+                    title="Remove schema context"
+                  >
+                    <X size={11} />
+                  </button>
+                )}
+                {activeSchemaId && (
+                  <span className="flex-shrink-0 text-[10px] text-emerald-600 bg-emerald-50 border border-emerald-200 px-2 py-1 rounded-full font-medium">
+                    ✓ Data-aware
+                  </span>
+                )}
+              </div>
+            )}
             
             <input 
               type="file" 
@@ -661,6 +833,8 @@ export default function ChatDashboard() {
           </div>
         </div>
       </div>
+      /* end chat area */
+      )}
     </div>
   );
 }

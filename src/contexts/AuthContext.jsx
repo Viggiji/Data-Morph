@@ -26,24 +26,47 @@ export function AuthProvider({ children }) {
 
   // Listen to Firebase auth state changes (persists across refreshes)
   useEffect(() => {
+    // Safety timeout: if Firebase never responds (e.g. network blocked),
+    // unblock the app after 5 seconds so the landing page is still accessible.
+    const timeout = setTimeout(() => {
+      setLoading((prev) => {
+        if (prev) console.warn('[Auth] Firebase timed out — continuing as guest.');
+        return false;
+      });
+    }, 5000);
+
     const unsubscribe = onAuthStateChanged(auth, async (firebaseUser) => {
+      clearTimeout(timeout);
       if (firebaseUser) {
         // Fetch extra profile data from Firestore
-        const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
-        setUser({
-          uid: firebaseUser.uid,
-          email: firebaseUser.email,
-          displayName: firebaseUser.displayName,
-          photoURL: firebaseUser.photoURL,
-          ...userDoc.data(),
-        });
+        try {
+          const userDoc = await getDoc(doc(db, 'users', firebaseUser.uid));
+          setUser({
+            uid: firebaseUser.uid,
+            email: firebaseUser.email,
+            displayName: firebaseUser.displayName,
+            photoURL: firebaseUser.photoURL,
+            ...userDoc.data(),
+          });
+        } catch (err) {
+          console.warn('[Auth] Firestore profile fetch failed:', err.message);
+          setUser({
+            uid: firebaseUser.uid,
+            email: firebaseUser.email,
+            displayName: firebaseUser.displayName,
+            photoURL: firebaseUser.photoURL,
+          });
+        }
       } else {
         setUser(null);
       }
       setLoading(false);
     });
 
-    return unsubscribe;
+    return () => {
+      clearTimeout(timeout);
+      unsubscribe();
+    };
   }, []);
 
   // Save user profile to Firestore (called on first sign-up)
@@ -83,7 +106,12 @@ export function AuthProvider({ children }) {
   async function loginWithGoogle() {
     const result = await signInWithPopup(auth, googleProvider);
     // Store profile in Firestore (only on first sign-in)
-    await saveUserProfile(result.user);
+    // Wrapped in try/catch so Firestore failures don't block auth
+    try {
+      await saveUserProfile(result.user);
+    } catch (err) {
+      console.warn('[Auth] Firestore profile save failed (non-blocking):', err.message);
+    }
     return result.user;
   }
 

@@ -9,11 +9,19 @@ lerna-debug.log*
 
 node_modules
 dist
-.env
-.env.local
-server/.env
 dist-ssr
-*.local
+
+# Environment files - NEVER commit these
+.env
+.env.*
+.env.local
+.env.*.local
+server/.env
+server/.env.*
+
+# Temp uploads
+temp_uploads/
+server/temp_uploads/
 
 # Editor directories and files
 .vscode/*
